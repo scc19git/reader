@@ -292,8 +292,8 @@ input[type=file]{display:none}
     <select id="voiceSel"></select>
   </div>
   <p class="hint">
-    小提醒：iPhone 請開「設定 → 輔助使用 → 語音內容 → 聲音 → 中文」可下載更好聽的聲音（如「美佳」進階版）。
-    朗讀中請保持 Safari 在前景；本 App 會盡量讓螢幕不自動鎖定。
+    「雲端聲音」最自然，需要網路，並支援鎖定畫面控制。
+    手機內建聲音不用網路；iPhone 可到「設定 → 輔助使用 → 語音內容 → 聲音 → 中文」下載更好聽的內建聲音（如「美佳」進階版）。
   </p>
   <button class="sheet-close" id="sheetClose">完成</button>
 </div>
@@ -444,11 +444,26 @@ function splitSentences(text){
 }
 
 /* ---------- voices ---------- */
+var CLOUD_VOICES = [
+  ["zh-TW-HsiaoChenNeural","曉臻（台灣女聲）"],
+  ["zh-TW-HsiaoYuNeural","曉雨（台灣女聲）"],
+  ["zh-CN-XiaoxiaoNeural","曉曉（大陸女聲・溫暖）"],
+  ["zh-CN-XiaoyiNeural","曉伊（大陸女聲・活潑）"]
+];
 var voices = [];
 function refreshVoices(){
   voices = synth.getVoices() || [];
   var sel = $("voiceSel");
   sel.innerHTML = "";
+  var gc = document.createElement("optgroup");
+  gc.label = "雲端聲音（較自然，需網路）";
+  CLOUD_VOICES.forEach(function(cv){
+    var o = document.createElement("option");
+    o.value = "edge:" + cv[0];
+    o.textContent = cv[1];
+    gc.appendChild(o);
+  });
+  sel.appendChild(gc);
   var zh = [], other = [];
   voices.forEach(function(v){
     (/^zh|^cmn|^yue/i.test(v.lang) ? zh : other).push(v);
@@ -469,7 +484,9 @@ function refreshVoices(){
   }
   // restore saved choice, else default to zh-TW
   var want = store.settings.voiceURI;
-  if(want && voices.some(function(v){ return v.voiceURI===want; })){
+  if(want && want.indexOf("edge:") === 0){
+    sel.value = want;
+  }else if(want && voices.some(function(v){ return v.voiceURI===want; })){
     sel.value = want;
   }else{
     var def = zh.filter(function(v){ return /tw/i.test(v.lang); })[0] || zh[0];
@@ -499,8 +516,133 @@ document.addEventListener("visibilitychange", function(){
   if(document.visibilityState === "visible" && playing) acquireWake();
 });
 
+/* ---------- 雲端聲音（微軟 Edge TTS，需網路） ---------- */
+function isCloud(){ return (store.settings.voiceURI||"").indexOf("edge:")===0; }
+function uuid(){
+  if(crypto.randomUUID) return crypto.randomUUID().replace(/-/g,"");
+  var a = crypto.getRandomValues(new Uint8Array(16));
+  return Array.prototype.map.call(a,function(b){return ("0"+b.toString(16)).slice(-2);}).join("");
+}
+function edgeSynth(text){
+  var voice = store.settings.voiceURI.slice(5);
+  var lang = voice.slice(0,5);
+  var ratePct = Math.round(((store.settings.rate||1)-1)*100);
+  var rateStr = (ratePct>=0?"+":"") + ratePct + "%";
+  var TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
+  var t = Math.floor(Date.now()/1000)+11644473600; t -= t%300;
+  return crypto.subtle.digest("SHA-256", new TextEncoder().encode((t*10000000)+TOKEN)).then(function(buf){
+    var gec = Array.prototype.map.call(new Uint8Array(buf),function(b){return ("0"+b.toString(16)).slice(-2);}).join("").toUpperCase();
+    var url = "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken="+TOKEN+"&Sec-MS-GEC="+gec+"&Sec-MS-GEC-Version=1-143.0.3650.75&ConnectionId="+uuid();
+    return new Promise(function(resolve,reject){
+      var ws = new WebSocket(url); ws.binaryType = "arraybuffer";
+      var chunks = [];
+      var timer = setTimeout(function(){ try{ws.close();}catch(e){} reject(new Error("連線逾時")); }, 15000);
+      ws.onopen = function(){
+        ws.send("X-Timestamp:"+new Date().toISOString()+"\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n"+JSON.stringify({context:{synthesis:{audio:{metadataoptions:{sentenceBoundaryEnabled:"false",wordBoundaryEnabled:"false"},outputFormat:"audio-24khz-48kbitrate-mono-mp3"}}}}));
+        var esc = text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+        var ssml = "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='"+lang+"'><voice name='"+voice+"'><prosody pitch='+0Hz' rate='"+rateStr+"' volume='+0%'>"+esc+"</prosody></voice></speak>";
+        ws.send("X-RequestId:"+uuid()+"\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:"+new Date().toISOString()+"\r\nPath:ssml\r\n\r\n"+ssml);
+      };
+      ws.onmessage = function(ev){
+        if(typeof ev.data === "string"){
+          if(ev.data.indexOf("Path:turn.end") >= 0){
+            clearTimeout(timer); ws.close();
+            if(!chunks.length){ reject(new Error("沒有收到音訊")); return; }
+            resolve(URL.createObjectURL(new Blob(chunks,{type:"audio/mpeg"})));
+          }
+        }else{
+          var v = new Uint8Array(ev.data);
+          var hl = (v[0]<<8) | v[1];
+          chunks.push(ev.data.slice(2+hl));
+        }
+      };
+      ws.onerror = function(){ clearTimeout(timer); reject(new Error("連線失敗")); };
+    });
+  });
+}
+var audioEl = new Audio();
+var cloudCache = {};
+var silentUrl = null;
+function silentWavUrl(){
+  if(silentUrl) return silentUrl;
+  var sr = 8000, n = 400;
+  var b = new ArrayBuffer(44+n*2), d = new DataView(b);
+  var ws = function(o,s){ for(var i=0;i<s.length;i++) d.setUint8(o+i, s.charCodeAt(i)); };
+  ws(0,"RIFF"); d.setUint32(4,36+n*2,true); ws(8,"WAVE"); ws(12,"fmt ");
+  d.setUint32(16,16,true); d.setUint16(20,1,true); d.setUint16(22,1,true);
+  d.setUint32(24,sr,true); d.setUint32(28,sr*2,true); d.setUint16(32,2,true); d.setUint16(34,16,true);
+  ws(36,"data"); d.setUint32(40,n*2,true);
+  silentUrl = URL.createObjectURL(new Blob([b],{type:"audio/wav"}));
+  return silentUrl;
+}
+function unlockAudio(){
+  // iOS 需要在使用者手勢裡先播一次，之後才能程式接續播放
+  if(audioEl._unlocked) return;
+  try{
+    audioEl.src = silentWavUrl();
+    var p = audioEl.play();
+    if(p && p.then) p.then(function(){ audioEl._unlocked = true; }).catch(function(){});
+  }catch(e){}
+}
+function cloudEnsure(i){
+  if(i < 0 || i >= sents.length || cloudCache[i] !== undefined) return;
+  cloudCache[i] = edgeSynth(sents[i]).then(
+    function(u){ cloudCache[i] = u; return u; },
+    function(e){ delete cloudCache[i]; throw e; }
+  );
+}
+function cloudGet(i){ cloudEnsure(i); return Promise.resolve(cloudCache[i]); }
+function cloudReset(){
+  for(var k in cloudCache){ if(typeof cloudCache[k] === "string") URL.revokeObjectURL(cloudCache[k]); }
+  cloudCache = {};
+}
+function cloudSpeakFrom(i){
+  var myToken = ++speakToken;
+  idx = Math.max(0, Math.min(i, sents.length-1));
+  updateUI();
+  var step = function(){
+    if(myToken !== speakToken || !playing) return;
+    if(idx >= sents.length){ finishPlayback(); return; }
+    cloudGet(idx).then(function(u){
+      if(myToken !== speakToken || !playing) return;
+      cloudEnsure(idx+1); cloudEnsure(idx+2);   // 預先合成後面兩句，接續無縫
+      var old = cloudCache[idx-2];
+      if(typeof old === "string"){ URL.revokeObjectURL(old); delete cloudCache[idx-2]; }
+      audioEl.src = u;
+      audioEl.onended = function(){
+        if(myToken !== speakToken || !playing) return;
+        idx++; saveProgress(); updateUI(); step();
+      };
+      var p = audioEl.play();
+      if(p && p.catch) p.catch(function(){
+        if(myToken !== speakToken || !playing) return;
+        pause(); toast("請再按一次播放");
+      });
+    }).catch(function(e){
+      if(myToken !== speakToken || !playing) return;
+      pause();
+      toast("雲端聲音連線失敗（" + ((e&&e.message)||e) + "），請檢查網路或改選手機內建聲音");
+    });
+  };
+  step();
+}
+function setMediaSession(){
+  if(!("mediaSession" in navigator)) return;
+  try{
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: currentDoc ? currentDoc.name : "朗讀器",
+      artist: "朗讀器"
+    });
+    navigator.mediaSession.setActionHandler("play", function(){ if(!playing) play(); });
+    navigator.mediaSession.setActionHandler("pause", function(){ if(playing) pause(); });
+    navigator.mediaSession.setActionHandler("nexttrack", function(){ jumpTo(idx+1, playing); });
+    navigator.mediaSession.setActionHandler("previoustrack", function(){ jumpTo(idx-1, playing); });
+  }catch(e){}
+}
+
 /* ---------- speech core ---------- */
 function speakFrom(i){
+  if(isCloud()){ cloudSpeakFrom(i); return; }
   synth.cancel();
   var myToken = ++speakToken;
   idx = Math.max(0, Math.min(i, sents.length-1));
@@ -533,16 +675,20 @@ function play(){
   if(!sents.length) return;
   if(idx >= sents.length) idx = 0;
   playing = true;
+  if(isCloud()){ unlockAudio(); setMediaSession(); }
   acquireWake();
   setPlayIcon(true);
+  if("mediaSession" in navigator){ try{ navigator.mediaSession.playbackState = "playing"; }catch(e){} }
   speakFrom(idx);
 }
 function pause(){
   playing = false;
   speakToken++;
   synth.cancel();
+  try{ audioEl.pause(); }catch(e){}
   releaseWake();
   setPlayIcon(false);
+  if("mediaSession" in navigator){ try{ navigator.mediaSession.playbackState = "paused"; }catch(e){} }
   saveProgress();
 }
 function finishPlayback(){
@@ -658,12 +804,14 @@ function openDoc(doc){
   $("setBtn").style.display = "";
   renderSentences();
   updateUI();
+  setMediaSession();
   var cur = $("sentences").children[Math.min(idx, sents.length-1)];
   if(cur) setTimeout(function(){ cur.scrollIntoView({block:"center"}); }, 50);
   if(idx > 0) toast("從上次的第 " + (idx+1) + " 句繼續");
 }
 function closeDoc(){
   pause();
+  cloudReset();
   currentDoc = null;
   $("title").textContent = "朗讀器";
   $("library").style.display = "block";
@@ -873,6 +1021,7 @@ $("rateBtn").addEventListener("click", function(){
   var i = RATES.indexOf(r); if(i<0) i = 2;
   store.settings.rate = RATES[(i+1) % RATES.length];
   saveStore(); showRate();
+  cloudReset();                 // 雲端語速是合成時決定的，改速要重新合成
   if(playing) speakFrom(idx);   // apply immediately
 });
 showRate();
@@ -912,12 +1061,13 @@ $("sheetClose").addEventListener("click", closeSheet);
 $("voiceSel").addEventListener("change", function(){
   store.settings.voiceURI = this.value;
   saveStore();
+  cloudReset();
   if(playing) speakFrom(idx);
 });
 
-/* iOS 有時切回前景後 speechSynthesis 卡住：輕推一下 */
+/* iOS 有時切回前景後 speechSynthesis 卡住：輕推一下（僅本機聲音；雲端聲音背景可續播不需要） */
 document.addEventListener("visibilitychange", function(){
-  if(document.visibilityState === "visible" && playing && !synth.speaking){
+  if(document.visibilityState === "visible" && playing && !isCloud() && !synth.speaking){
     speakFrom(idx);
   }
 });
