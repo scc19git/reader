@@ -293,8 +293,8 @@ input[type=file]{display:none}
     <select id="voiceSel"></select>
   </div>
   <p class="hint">
-    「雲端聲音」最自然，需要網路，並支援鎖定畫面控制。
-    手機內建聲音不用網路；iPhone 可到「設定 → 輔助使用 → 語音內容 → 聲音 → 中文」下載更好聽的內建聲音（如「美佳」進階版）。
+    iPhone 可到「設定 → 輔助使用 → 語音內容 → 聲音 → 中文」下載更好聽的聲音（如「美佳」進階版，下載後這裡會多出來）。
+    朗讀中請保持 App 在前景，播放時螢幕不會自動鎖定。
   </p>
   <button class="sheet-close" id="sheetClose">完成</button>
 </div>
@@ -390,11 +390,17 @@ var synth = window.speechSynthesis;
 
 /* ---------- storage ---------- */
 function loadStore(){
+  var s = null;
   try{
-    var s = JSON.parse(localStorage.getItem(LS_KEY));
-    if(s && s.docs) return s;
+    s = JSON.parse(localStorage.getItem(LS_KEY));
   }catch(e){}
-  return {docs:[], settings:{rate:1, voiceURI:""}};
+  if(!s || !s.docs) s = {docs:[], settings:{rate:0.8, voiceURI:""}};
+  if(!s.settings.v2){          // 一次性遷移：預設美佳 0.8×，清掉雲端聲音設定
+    s.settings.v2 = true;
+    s.settings.rate = 0.8;
+    s.settings.voiceURI = "";
+  }
+  return s;
 }
 function saveStore(){
   try{ localStorage.setItem(LS_KEY, JSON.stringify(store)); }
@@ -454,15 +460,6 @@ function refreshVoices(){
   voices = synth.getVoices() || [];
   var sel = $("voiceSel");
   sel.innerHTML = "";
-  var gc = document.createElement("optgroup");
-  gc.label = "雲端聲音（較自然，需網路）";
-  CLOUD_VOICES.forEach(function(cv){
-    var o = document.createElement("option");
-    o.value = cv[0];
-    o.textContent = cv[1];
-    gc.appendChild(o);
-  });
-  sel.appendChild(gc);
   var zh = [], other = [];
   voices.forEach(function(v){
     (/^zh|^cmn|^yue/i.test(v.lang) ? zh : other).push(v);
@@ -481,18 +478,15 @@ function refreshVoices(){
     var g2 = document.createElement("optgroup"); g2.label = "其他語言";
     other.forEach(function(v){ add(v,g2); }); sel.appendChild(g2);
   }
-  // restore saved choice, else default to zh-TW
+  // restore saved choice, else default to 美佳（Mei-Jia），其次任一 zh-TW
   var want = store.settings.voiceURI;
-  if(want && want.indexOf("edge:") === 0){   // 舊版微軟聲音設定 → 轉成 Google 台灣女聲
-    want = "gtts:zh-TW";
-    store.settings.voiceURI = want;
-  }
-  if(want && want.indexOf("gtts:") === 0){
-    sel.value = want;
-  }else if(want && voices.some(function(v){ return v.voiceURI===want; })){
+  if(want && (want.indexOf("edge:") === 0 || want.indexOf("gtts:") === 0)) want = "";  // 舊的雲端設定視為未設定
+  if(want && voices.some(function(v){ return v.voiceURI===want; })){
     sel.value = want;
   }else{
-    var def = zh.filter(function(v){ return /tw/i.test(v.lang); })[0] || zh[0];
+    var def = zh.filter(function(v){ return /美佳|mei-?jia/i.test(v.name); })[0]
+           || zh.filter(function(v){ return /tw/i.test(v.lang); })[0]
+           || zh[0];
     if(def) sel.value = def.voiceURI;
   }
 }
