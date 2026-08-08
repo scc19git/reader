@@ -1,4 +1,5 @@
 <meta charset="utf-8">
+<meta name="referrer" content="no-referrer">
 <title>朗讀器</title>
 <link rel="manifest" href="manifest.webmanifest">
 <meta name="theme-color" content="#1F6E5C">
@@ -445,10 +446,8 @@ function splitSentences(text){
 
 /* ---------- voices ---------- */
 var CLOUD_VOICES = [
-  ["zh-TW-HsiaoChenNeural","曉臻（台灣女聲）"],
-  ["zh-TW-HsiaoYuNeural","曉雨（台灣女聲）"],
-  ["zh-CN-XiaoxiaoNeural","曉曉（大陸女聲・溫暖）"],
-  ["zh-CN-XiaoyiNeural","曉伊（大陸女聲・活潑）"]
+  ["gtts:zh-TW","Google 台灣女聲"],
+  ["gtts:zh-CN","Google 大陸女聲"]
 ];
 var voices = [];
 function refreshVoices(){
@@ -459,7 +458,7 @@ function refreshVoices(){
   gc.label = "雲端聲音（較自然，需網路）";
   CLOUD_VOICES.forEach(function(cv){
     var o = document.createElement("option");
-    o.value = "edge:" + cv[0];
+    o.value = cv[0];
     o.textContent = cv[1];
     gc.appendChild(o);
   });
@@ -484,7 +483,11 @@ function refreshVoices(){
   }
   // restore saved choice, else default to zh-TW
   var want = store.settings.voiceURI;
-  if(want && want.indexOf("edge:") === 0){
+  if(want && want.indexOf("edge:") === 0){   // 舊版微軟聲音設定 → 轉成 Google 台灣女聲
+    want = "gtts:zh-TW";
+    store.settings.voiceURI = want;
+  }
+  if(want && want.indexOf("gtts:") === 0){
     sel.value = want;
   }else if(want && voices.some(function(v){ return v.voiceURI===want; })){
     sel.value = want;
@@ -516,52 +519,17 @@ document.addEventListener("visibilitychange", function(){
   if(document.visibilityState === "visible" && playing) acquireWake();
 });
 
-/* ---------- 雲端聲音（微軟 Edge TTS，需網路） ---------- */
-function isCloud(){ return (store.settings.voiceURI||"").indexOf("edge:")===0; }
-function uuid(){
-  if(crypto.randomUUID) return crypto.randomUUID().replace(/-/g,"");
-  var a = crypto.getRandomValues(new Uint8Array(16));
-  return Array.prototype.map.call(a,function(b){return ("0"+b.toString(16)).slice(-2);}).join("");
+/* ---------- 雲端聲音（Google 翻譯語音，需網路） ---------- */
+function isCloud(){
+  var v = store.settings.voiceURI || "";
+  return v.indexOf("gtts:") === 0 || v.indexOf("edge:") === 0;  // edge: 為舊版設定值
 }
-function edgeSynth(text){
-  var voice = store.settings.voiceURI.slice(5);
-  var lang = voice.slice(0,5);
-  var ratePct = Math.round(((store.settings.rate||1)-1)*100);
-  var rateStr = (ratePct>=0?"+":"") + ratePct + "%";
-  var TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
-  var t = Math.floor(Date.now()/1000)+11644473600; t -= t%300;
-  return crypto.subtle.digest("SHA-256", new TextEncoder().encode((t*10000000)+TOKEN)).then(function(buf){
-    var gec = Array.prototype.map.call(new Uint8Array(buf),function(b){return ("0"+b.toString(16)).slice(-2);}).join("").toUpperCase();
-    var url = "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken="+TOKEN+"&Sec-MS-GEC="+gec+"&Sec-MS-GEC-Version=1-143.0.3650.75&ConnectionId="+uuid();
-    return new Promise(function(resolve,reject){
-      var ws = new WebSocket(url); ws.binaryType = "arraybuffer";
-      var chunks = [];
-      var timer = setTimeout(function(){ try{ws.close();}catch(e){} reject(new Error("連線逾時")); }, 15000);
-      ws.onopen = function(){
-        ws.send("X-Timestamp:"+new Date().toISOString()+"\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n"+JSON.stringify({context:{synthesis:{audio:{metadataoptions:{sentenceBoundaryEnabled:"false",wordBoundaryEnabled:"false"},outputFormat:"audio-24khz-48kbitrate-mono-mp3"}}}}));
-        var esc = text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-        var ssml = "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='"+lang+"'><voice name='"+voice+"'><prosody pitch='+0Hz' rate='"+rateStr+"' volume='+0%'>"+esc+"</prosody></voice></speak>";
-        ws.send("X-RequestId:"+uuid()+"\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:"+new Date().toISOString()+"\r\nPath:ssml\r\n\r\n"+ssml);
-      };
-      ws.onmessage = function(ev){
-        if(typeof ev.data === "string"){
-          if(ev.data.indexOf("Path:turn.end") >= 0){
-            clearTimeout(timer); ws.close();
-            if(!chunks.length){ reject(new Error("沒有收到音訊")); return; }
-            resolve(URL.createObjectURL(new Blob(chunks,{type:"audio/mpeg"})));
-          }
-        }else{
-          var v = new Uint8Array(ev.data);
-          var hl = (v[0]<<8) | v[1];
-          chunks.push(ev.data.slice(2+hl));
-        }
-      };
-      ws.onerror = function(){ clearTimeout(timer); reject(new Error("連線失敗")); };
-    });
-  });
+function gttsUrl(text){
+  var v = store.settings.voiceURI || "";
+  var tl = v.indexOf("gtts:") === 0 ? v.slice(5) : "zh-TW";
+  return "https://translate.google.com/translate_tts?ie=UTF-8&q=" + encodeURIComponent(text) + "&tl=" + tl + "&client=tw-ob";
 }
 var audioEl = new Audio();
-var cloudCache = {};
 var silentUrl = null;
 function silentWavUrl(){
   if(silentUrl) return silentUrl;
@@ -584,18 +552,7 @@ function unlockAudio(){
     if(p && p.then) p.then(function(){ audioEl._unlocked = true; }).catch(function(){});
   }catch(e){}
 }
-function cloudEnsure(i){
-  if(i < 0 || i >= sents.length || cloudCache[i] !== undefined) return;
-  cloudCache[i] = edgeSynth(sents[i]).then(
-    function(u){ cloudCache[i] = u; return u; },
-    function(e){ delete cloudCache[i]; throw e; }
-  );
-}
-function cloudGet(i){ cloudEnsure(i); return Promise.resolve(cloudCache[i]); }
-function cloudReset(){
-  for(var k in cloudCache){ if(typeof cloudCache[k] === "string") URL.revokeObjectURL(cloudCache[k]); }
-  cloudCache = {};
-}
+function cloudReset(){ /* Google 語音無快取需求，保留呼叫點 */ }
 function cloudSpeakFrom(i){
   var myToken = ++speakToken;
   idx = Math.max(0, Math.min(i, sents.length-1));
@@ -603,25 +560,24 @@ function cloudSpeakFrom(i){
   var step = function(){
     if(myToken !== speakToken || !playing) return;
     if(idx >= sents.length){ finishPlayback(); return; }
-    cloudGet(idx).then(function(u){
+    audioEl.src = gttsUrl(sents[idx]);
+    audioEl.onloadedmetadata = function(){
+      audioEl.playbackRate = store.settings.rate || 1;   // 語速用播放速度調，換 src 後要重設
+    };
+    audioEl.onended = function(){
       if(myToken !== speakToken || !playing) return;
-      cloudEnsure(idx+1); cloudEnsure(idx+2);   // 預先合成後面兩句，接續無縫
-      var old = cloudCache[idx-2];
-      if(typeof old === "string"){ URL.revokeObjectURL(old); delete cloudCache[idx-2]; }
-      audioEl.src = u;
-      audioEl.onended = function(){
-        if(myToken !== speakToken || !playing) return;
-        idx++; saveProgress(); updateUI(); step();
-      };
-      var p = audioEl.play();
-      if(p && p.catch) p.catch(function(){
-        if(myToken !== speakToken || !playing) return;
-        pause(); toast("請再按一次播放");
-      });
-    }).catch(function(e){
+      idx++; saveProgress(); updateUI(); step();
+    };
+    audioEl.onerror = function(){
       if(myToken !== speakToken || !playing) return;
       pause();
-      toast("雲端聲音連線失敗（" + ((e&&e.message)||e) + "），請檢查網路或改選手機內建聲音");
+      toast("雲端聲音載入失敗，請檢查網路，或改選手機內建聲音");
+    };
+    var p = audioEl.play();
+    if(p && p.catch) p.catch(function(err){
+      if(myToken !== speakToken || !playing) return;
+      if(err && err.name === "NotAllowedError"){ pause(); toast("請再按一次播放"); }
+      // 其他錯誤交給 onerror 處理
     });
   };
   step();
@@ -1021,8 +977,11 @@ $("rateBtn").addEventListener("click", function(){
   var i = RATES.indexOf(r); if(i<0) i = 2;
   store.settings.rate = RATES[(i+1) % RATES.length];
   saveStore(); showRate();
-  cloudReset();                 // 雲端語速是合成時決定的，改速要重新合成
-  if(playing) speakFrom(idx);   // apply immediately
+  if(isCloud()){
+    audioEl.playbackRate = store.settings.rate;   // 雲端聲音直接調播放速度，不中斷
+  }else if(playing){
+    speakFrom(idx);   // apply immediately
+  }
 });
 showRate();
 
