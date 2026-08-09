@@ -803,11 +803,11 @@ function refreshMarkCount(){
 function sortedMarks(){
   return Array.from(docMarks).sort(function(a,b){ return a-b; }).filter(function(i){ return i < sents.length; });
 }
-function marksMarkdown(){
+function marksMarkdownFor(list){
   var d = new Date();
   var pad = function(n){ return ("0"+n).slice(-2); };
   var lines = ["### 擷取 " + pad(d.getHours()) + ":" + pad(d.getMinutes()), ""];
-  sortedMarks().forEach(function(i){ lines.push("> " + sents[i]); lines.push(""); });
+  list.forEach(function(i){ lines.push("> " + sents[i]); lines.push(""); });
   return lines.join("\n");
 }
 function obsidianNoteName(){
@@ -845,16 +845,26 @@ $("markMask").addEventListener("click", closeMarkSheet);
 $("markClose").addEventListener("click", closeMarkSheet);
 $("markToObsidian").addEventListener("click", function(){
   if(!docMarks.size){ toast("還沒有畫線"); return; }
+  var already = new Set(currentDoc.sentMarks || []);
+  var fresh = sortedMarks().filter(function(i){ return !already.has(i); });
+  if(!fresh.length){
+    if(!confirm("畫線都送過了，沒有新的。要整份重送一次嗎？")) return;
+    fresh = sortedMarks();
+  }
   var uri = "obsidian://new?vault=" + encodeURIComponent(VAULT_NAME)
           + "&name=" + encodeURIComponent(obsidianNoteName())
-          + "&content=" + encodeURIComponent(marksMarkdown())
+          + "&content=" + encodeURIComponent(marksMarkdownFor(fresh))
           + "&append=true";
-  if(uri.length > 15000){ toast("畫線太多，一次送不完，請先複製貼上"); return; }
+  if(uri.length > 15000){ toast("要送的畫線太多，一次送不完，請先複製貼上"); return; }
+  // 記住已送過的句子，之後只送新畫的
+  currentDoc.sentMarks = Array.from(new Set((currentDoc.sentMarks||[]).concat(fresh))).sort(function(a,b){ return a-b; });
+  saveStore();
+  toast("送出 " + fresh.length + " 句到 Obsidian");
   window.location.href = uri;
 });
 $("markCopy").addEventListener("click", function(){
   if(!docMarks.size){ toast("還沒有畫線"); return; }
-  var md = "# " + currentDoc.name + " 畫線\n\n" + marksMarkdown();
+  var md = "# " + currentDoc.name + " 畫線\n\n" + marksMarkdownFor(sortedMarks());
   var done = function(){ toast("已複製，可貼到任何地方"); };
   if(navigator.clipboard && navigator.clipboard.writeText){
     navigator.clipboard.writeText(md).then(done, function(){ toast("複製失敗"); });
@@ -867,7 +877,7 @@ $("markCopy").addEventListener("click", function(){
 });
 $("markShare").addEventListener("click", function(){
   if(!docMarks.size){ toast("還沒有畫線"); return; }
-  var md = "# " + currentDoc.name + " 畫線\n\n" + marksMarkdown();
+  var md = "# " + currentDoc.name + " 畫線\n\n" + marksMarkdownFor(sortedMarks());
   if(navigator.share){
     navigator.share({title: currentDoc.name + " 畫線", text: md}).catch(function(){});
   }else{
