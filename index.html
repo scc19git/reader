@@ -9,6 +9,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <style>
 :root{
+  --mark-bg:#FCF3C8;
+  --mark-line:#D9A400;
   --bg:#F7F5F0;
   --surface:#FFFFFF;
   --ink:#26302B;
@@ -23,6 +25,8 @@
 }
 @media (prefers-color-scheme: dark){
   :root{
+    --mark-bg:#3A331A;
+    --mark-line:#C9A227;
     --bg:#141917;
     --surface:#1C2320;
     --ink:#E6E9E5;
@@ -37,12 +41,14 @@
   }
 }
 :root[data-theme="light"]{
+  --mark-bg:#FCF3C8; --mark-line:#D9A400;
   --bg:#F7F5F0; --surface:#FFFFFF; --ink:#26302B; --ink-soft:#6B7570;
   --line:#E3E0D8; --accent:#1F6E5C; --accent-ink:#FFFFFF;
   --hl-bg:#E4EEE9; --hl-border:#1F6E5C; --danger:#A8402F;
   --shadow:0 -6px 24px rgba(38,48,43,.10);
 }
 :root[data-theme="dark"]{
+  --mark-bg:#3A331A; --mark-line:#C9A227;
   --bg:#141917; --surface:#1C2320; --ink:#E6E9E5; --ink-soft:#8FA098;
   --line:#2A332F; --accent:#4DA98F; --accent-ink:#0E1512;
   --hl-bg:#24352E; --hl-border:#4DA98F; --danger:#D9705C;
@@ -118,6 +124,7 @@ header h1{
 #sentences{
   max-width:640px; margin:0 auto;
   padding:18px 18px 220px;
+  -webkit-user-select:none; user-select:none; -webkit-touch-callout:none;
 }
 .sent{
   padding:4px 10px; margin:2px -10px; border-radius:8px;
@@ -127,6 +134,30 @@ header h1{
   background:var(--hl-bg); border-left-color:var(--hl-border);
 }
 .sent.done{color:var(--ink-soft)}
+.sent.marked{
+  background:var(--mark-bg);
+  text-decoration:underline;
+  text-decoration-color:var(--mark-line);
+  text-decoration-thickness:2px;
+  text-underline-offset:4px;
+}
+.sent.current.marked{
+  background:var(--mark-bg); border-left-color:var(--mark-line);
+}
+.mark-item{
+  padding:10px 12px; border-radius:10px; background:var(--mark-bg);
+  margin-bottom:8px; font-size:15px; line-height:1.6; cursor:pointer;
+}
+.mark-list-box{max-height:40vh; overflow-y:auto; margin-bottom:14px}
+.mark-actions{display:flex; gap:8px; margin-bottom:10px}
+.mark-actions button{
+  flex:1; padding:12px 6px; border:none; border-radius:12px;
+  font-size:14px; font-weight:700; cursor:pointer;
+  background:var(--accent); color:var(--accent-ink);
+}
+.mark-actions button.secondary{
+  background:var(--bg); color:var(--ink); border:1px solid var(--line);
+}
 
 /* ---------- player bar ---------- */
 #player{
@@ -231,6 +262,7 @@ input[type=file]{display:none}
 <header>
   <button class="hbtn" id="backBtn" style="display:none">‹ 書庫</button>
   <h1 id="title">朗讀器</h1>
+  <button class="hbtn" id="markListBtn" style="display:none">🖍<span id="markCount"></span></button>
   <button class="hbtn" id="setBtn" style="display:none">聲音</button>
 </header>
 
@@ -297,6 +329,23 @@ input[type=file]{display:none}
     朗讀中請保持 App 在前景，播放時螢幕不會自動鎖定。
   </p>
   <button class="sheet-close" id="sheetClose">完成</button>
+</div>
+
+<!-- 畫線清單 -->
+<div id="markMask" style="position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:40;display:none"></div>
+<div id="markSheet" style="position:fixed;left:0;right:0;bottom:0;z-index:41;display:none;background:var(--surface);border-radius:18px 18px 0 0;padding:20px 20px calc(env(safe-area-inset-bottom) + 24px);max-width:640px;margin:0 auto">
+  <h3 style="margin:0 0 12px;font-size:17px">畫線的句子（<span id="markSheetCount">0</span>）</h3>
+  <div class="mark-list-box" id="markList"></div>
+  <div class="mark-actions">
+    <button id="markToObsidian">送進 Obsidian</button>
+    <button id="markCopy" class="secondary">複製</button>
+    <button id="markShare" class="secondary">分享</button>
+  </div>
+  <div class="mark-actions">
+    <button id="markClear" class="secondary" style="color:var(--danger)">清除全部畫線</button>
+    <button id="markClose" class="secondary">關閉</button>
+  </div>
+  <p class="hint">聽到重點時，<b>按住句子半秒</b>就會畫線；再按住一次取消。「送進 Obsidian」會在手機的 Obsidian App 建立筆記（放在「朗讀畫線」資料夾），同步後電腦也看得到。</p>
 </div>
 
 <!-- 貼上文字 -->
@@ -678,7 +727,7 @@ function updateUI(){
   var shown = Math.min(idx, total-1);
   var els = $("sentences").children;
   for(var i=0;i<els.length;i++){
-    els[i].className = "sent" + (i===shown ? " current" : (i<idx ? " done" : ""));
+    els[i].className = "sent" + (i===shown ? " current" : (i<idx ? " done" : "")) + (docMarks.has(i) ? " marked" : "");
   }
   var pct = total ? Math.min(100, Math.round(idx/total*100)) : 0;
   $("barFill").style.width = pct + "%";
@@ -700,13 +749,139 @@ function renderSentences(){
   var frag = document.createDocumentFragment();
   sents.forEach(function(s, i){
     var d = document.createElement("div");
-    d.className = "sent";
+    d.className = "sent" + (docMarks.has(i) ? " marked" : "");
     d.textContent = s;
-    d.addEventListener("click", function(){ jumpTo(i, false); });
+    attachSentenceEvents(d, i);
     frag.appendChild(d);
   });
   box.appendChild(frag);
 }
+
+/* ---------- 畫線（長按句子） ---------- */
+var docMarks = new Set();
+var VAULT_NAME = "OBSYNC";
+function attachSentenceEvents(el, i){
+  var timer = null, sx = 0, sy = 0, suppress = false;
+  el.addEventListener("pointerdown", function(ev){
+    sx = ev.clientX; sy = ev.clientY; suppress = false;
+    timer = setTimeout(function(){
+      timer = null; suppress = true;
+      toggleMark(i);
+      if(navigator.vibrate) navigator.vibrate(15);
+    }, 550);
+  });
+  el.addEventListener("pointermove", function(ev){
+    if(timer && (Math.abs(ev.clientX-sx) > 12 || Math.abs(ev.clientY-sy) > 12)){
+      clearTimeout(timer); timer = null;   // 在捲動，不是長按
+    }
+  });
+  ["pointerup","pointercancel","pointerleave"].forEach(function(t){
+    el.addEventListener(t, function(){ if(timer){ clearTimeout(timer); timer = null; } });
+  });
+  el.addEventListener("click", function(){
+    if(suppress){ suppress = false; return; }   // 長按後的 click 不當跳轉
+    jumpTo(i, false);
+  });
+  el.addEventListener("contextmenu", function(ev){ ev.preventDefault(); });
+}
+function toggleMark(i){
+  if(docMarks.has(i)) docMarks.delete(i); else docMarks.add(i);
+  saveMarks();
+  updateUI();
+  refreshMarkCount();
+  toast(docMarks.has(i) ? "已畫線 🖍" : "已取消畫線");
+}
+function saveMarks(){
+  if(!currentDoc) return;
+  currentDoc.marks = Array.from(docMarks).sort(function(a,b){ return a-b; });
+  currentDoc.updated = Date.now();
+  saveStore();
+}
+function refreshMarkCount(){
+  $("markCount").textContent = docMarks.size ? " " + docMarks.size : "";
+}
+function sortedMarks(){
+  return Array.from(docMarks).sort(function(a,b){ return a-b; }).filter(function(i){ return i < sents.length; });
+}
+function marksMarkdown(){
+  var d = new Date();
+  var pad = function(n){ return ("0"+n).slice(-2); };
+  var lines = ["### 擷取 " + pad(d.getHours()) + ":" + pad(d.getMinutes()), ""];
+  sortedMarks().forEach(function(i){ lines.push("> " + sents[i]); lines.push(""); });
+  return lines.join("\n");
+}
+function obsidianNoteName(){
+  var d = new Date();
+  var pad = function(n){ return ("0"+n).slice(-2); };
+  return "朗讀畫線/" + (d.getFullYear()%100) + "-" + pad(d.getMonth()+1) + "-" + pad(d.getDate()) + " " + currentDoc.name;
+}
+function openMarkSheet(){
+  var list = $("markList");
+  list.innerHTML = "";
+  var ms = sortedMarks();
+  $("markSheetCount").textContent = ms.length;
+  if(!ms.length){
+    var empty = document.createElement("div");
+    empty.className = "hint";
+    empty.textContent = "還沒有畫線。聽到重點時按住那句半秒即可畫線。";
+    list.appendChild(empty);
+  }
+  ms.forEach(function(i){
+    var item = document.createElement("div");
+    item.className = "mark-item";
+    item.textContent = sents[i];
+    item.addEventListener("click", function(){ closeMarkSheet(); jumpTo(i, false); });
+    list.appendChild(item);
+  });
+  $("markMask").style.display = "block";
+  $("markSheet").style.display = "block";
+}
+function closeMarkSheet(){
+  $("markMask").style.display = "none";
+  $("markSheet").style.display = "none";
+}
+$("markListBtn").addEventListener("click", openMarkSheet);
+$("markMask").addEventListener("click", closeMarkSheet);
+$("markClose").addEventListener("click", closeMarkSheet);
+$("markToObsidian").addEventListener("click", function(){
+  if(!docMarks.size){ toast("還沒有畫線"); return; }
+  var uri = "obsidian://new?vault=" + encodeURIComponent(VAULT_NAME)
+          + "&name=" + encodeURIComponent(obsidianNoteName())
+          + "&content=" + encodeURIComponent(marksMarkdown())
+          + "&append=true";
+  if(uri.length > 15000){ toast("畫線太多，一次送不完，請先複製貼上"); return; }
+  window.location.href = uri;
+});
+$("markCopy").addEventListener("click", function(){
+  if(!docMarks.size){ toast("還沒有畫線"); return; }
+  var md = "# " + currentDoc.name + " 畫線\n\n" + marksMarkdown();
+  var done = function(){ toast("已複製，可貼到任何地方"); };
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(md).then(done, function(){ toast("複製失敗"); });
+  }else{
+    var ta = document.createElement("textarea");
+    ta.value = md; document.body.appendChild(ta); ta.select();
+    try{ document.execCommand("copy"); done(); }catch(e){ toast("複製失敗"); }
+    document.body.removeChild(ta);
+  }
+});
+$("markShare").addEventListener("click", function(){
+  if(!docMarks.size){ toast("還沒有畫線"); return; }
+  var md = "# " + currentDoc.name + " 畫線\n\n" + marksMarkdown();
+  if(navigator.share){
+    navigator.share({title: currentDoc.name + " 畫線", text: md}).catch(function(){});
+  }else{
+    toast("此瀏覽器不支援分享，請用「複製」");
+  }
+});
+$("markClear").addEventListener("click", function(){
+  if(!docMarks.size){ toast("沒有畫線可清除"); return; }
+  if(confirm("清除這篇的全部 " + docMarks.size + " 條畫線？")){
+    docMarks.clear();
+    saveMarks(); updateUI(); refreshMarkCount();
+    openMarkSheet();   // 重整清單畫面
+  }
+});
 
 /* ---------- library ---------- */
 function renderLibrary(){
@@ -746,12 +921,15 @@ function openDoc(doc){
   doc.total = sents.length;
   idx = Math.min(doc.index||0, sents.length);
   if(idx >= sents.length) idx = 0;   // finished before → restart
+  docMarks = new Set(doc.marks || []);
+  refreshMarkCount();
   $("title").textContent = doc.name;
   $("library").style.display = "none";
   $("reader").style.display = "block";
   $("player").style.display = "block";
   $("backBtn").style.display = "";
   $("setBtn").style.display = "";
+  $("markListBtn").style.display = "";
   renderSentences();
   updateUI();
   setMediaSession();
@@ -763,12 +941,14 @@ function closeDoc(){
   pause();
   cloudReset();
   currentDoc = null;
+  docMarks = new Set();
   $("title").textContent = "朗讀器";
   $("library").style.display = "block";
   $("reader").style.display = "none";
   $("player").style.display = "none";
   $("backBtn").style.display = "none";
   $("setBtn").style.display = "none";
+  $("markListBtn").style.display = "none";
   renderLibrary();
   window.scrollTo(0,0);
 }
